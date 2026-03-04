@@ -284,6 +284,7 @@ func main() {
 			escapedMsg := strings.ReplaceAll(msg, "*", "\\*")
 			escapedMsg = strings.ReplaceAll(escapedMsg, "#", "\\#")
 			escapedMsg = strings.ReplaceAll(escapedMsg, "\\", "\\\\")
+			escapedMsg += "  \n" // Zeilenumbruch in Markdown
 			logLines = append(logLines, escapedMsg)
 			logRichText.ParseMarkdown(strings.Join(logLines, "  \n"))
 			logScroll.ScrollToBottom()
