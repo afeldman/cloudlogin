@@ -1,5 +1,4 @@
 package kubernetes
-package kubernetes
 
 import (
 	"fmt"

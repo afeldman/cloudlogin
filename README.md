@@ -1,10 +1,13 @@
 # Cloud Login Manager
 
-Ein modernes Desktop-Tool zur Verwaltung von AWS- und Kubernetes-Verbindungen mit grafischer Benutzeroberfläche.
+Ein modernes Tool zur Verwaltung von AWS- und Kubernetes-Verbindungen mit **GUI, CLI und TUI**-Modi.
 
 ## Features
 
+### GUI (Grafische Oberfläche)
 - **AWS SSO Login**: Einfache Authentifizierung zu AWS SSO Profilen
+- **AWS SSO Config Update**: Live-Aktualisierung von AWS Profilen aus SSO
+- **AWS Config Sanitization**: Automatische Bereinigung von beschädigten AWS Config-Dateien
 - **Kubernetes Kontext Verwaltung**: Schneller Wechsel zwischen K8s Clustern
 - **Verbindungstests**: Überprüfe AWS und Kubernetes Konnektivität
 - **Quick Actions**: Schnelleinstieg zu:
@@ -12,6 +15,15 @@ Ein modernes Desktop-Tool zur Verwaltung von AWS- und Kubernetes-Verbindungen mi
   - k9s Terminal UI für Kubernetes
   - AWS Environment-Variablen Export
   - Tool-Verfügbarkeitsprüfung
+
+### CLI (Kommandozeile)
+- `--update-aws-config`: Aktualisiert AWS Profile basierend auf SSO (non-interactive)
+- `--sanitize-aws-config`: Bereinigt beschädigte AWS Config-Dateien und erstellt Backup
+
+### TUI (Terminal User Interface)
+- `cloudlogin-awsconfig-tui`: Eigenständiges Bubble Tea Programm für interaktive SSO Config-Updates
+- Live Log-Streaming während der Verarbeitung
+- Einfache Bedienung: Enter zum Starten, q zum Beenden
 
 ## Requirements
 
@@ -46,23 +58,86 @@ go build -o cloudlogin main.go
 
 ## Verwendung
 
+### GUI Mode (Standard)
+```bash
+./cloudlogin
+```
+
+Startet die grafische Oberfläche mit Tabs für:
 1. **AWS Tab**: AWS Profile aus `~/.aws/config` wählen, Verbindung testen oder SSO Login durchführen
 2. **Kubernetes Tab**: Kubernetes Contexts aus KUBECONFIG wählen und zwischen ihnen wechseln
 3. **Quick Actions Tab**: Schnelle Aktionen für häufige Aufgaben
+
+### CLI Mode
+```bash
+# AWS SSO Profiles aktualisieren (non-interactive)
+./cloudlogin --update-aws-config
+
+# AWS Config-Datei bereinigen (z.B. bei Parsing-Fehlern)
+./cloudlogin --sanitize-aws-config
+```
+
+**Hinweis zur Sanitization**: Falls `aws sso login` mit "Unable to parse config file" fehlschlägt, kann die AWS Config-Datei beschädigte Zeichen enthalten. Das `--sanitize-aws-config` Flag bereinigt diese automatisch und erstellt eine Backup-Datei.
+
+### TUI Mode
+```bash
+# AWS SSO Config-Update mit interaktiver Terminal UI
+./bin/cloudlogin-awsconfig-tui
+```
+
+Startet eine Bubble Tea-basierte Terminal-Benutzeroberfläche mit:
+- Live-Logging während des SSO Updates
+- Interaktive Bedienung (Enter zum Starten, q zum Beenden)
 
 ## Architektur
 
 Das Tool ist in folgende Funktionsbereiche strukturiert:
 
-- **Config Parser**: Liest AWS Profiles und Kubernetes Contexts
-- **Login Actions**: Führt AWS SSO Logins und Kubernetes Context Switches durch
-- **GUI**: Fyne-basierte Oberfläche mit Tabs für jede Funktion
+- **`main.go`**: GUI Entry Point (Fyne) + CLI Dispatcher
+- **`cmd/awsconfig-tui/main.go`**: TUI Entry Point (Bubble Tea)
+- **`pkg/awsconfig/`**: Reusable SSO Config Management Logic
+  - `UpdateFromSSO()`: Aktualisiert AWS Profile basierend auf SSO
+  - `SanitizeConfigFile()`: Bereinigt beschädigte AWS Config-Dateien
+- **`pkg/provider/`**: (Legacy) Plugin-basierte Architektur für Cloud Provider
 
-## Logging
+### Neue Paketstruktur
 
-Alle Aktionen werden in einer integrierten Log-Konsole protokolliert. Mit dem "Log leeren"-Button können Logs zurückgesetzt werden.
+Das `pkg/awsconfig` Package enthält die SSO-Verwaltungslogik, die von allen Modi (GUI, CLI, TUI) verwendet wird:
 
-## Entwicklung
+```
+pkg/awsconfig/
+├── sso_config.go        # UpdateFromSSO, SanitizeConfigFile, AWS SSO Integration
+└── README.md            # Ausführliche Dokumentation des Packages
+```
+
+Das Package mit:
+- AWS SSO Token-Management
+- Account und Role Enumeration via AWS API
+- Config-Datei Parsing und Merging
+- Umweltvariation-Handling für kaputte Config-Dateien
+- Logging-Callbacks für Integration in alle Modi
+
+## Logging & Monitoring
+
+Alle Aktionen werden in einer integrierten Log-Konsole protokolliert:
+- In der **GUI**: Integrierte Log-Konsole am unteren Rand mit "Log leeren"-Button
+- In der **CLI**: Ausgabe auf stdout/stderr
+- In der **TUI**: Live-Log-Display während der Verarbeitung
+
+Logs zeigen:
+- ✅ Erfolgreiche Operationen (grün)
+- ❌ Fehler (rot) - Sensitive-Tokens werden automatisch maskiert
+- 🔐/🔄/🔍 Vorgänge (andere Icons zur schnellen Orientierung)
+
+## Dependencies
+
+- **Go 1.21+**
+- **CGO**: Erforderlich für einige externe Abhängigkeiten (CGO_ENABLED=1)
+- **AWS CLI**: `aws` muss installiert sein für SSO funktionalität
+- **kubectl**: Erforderlich für Kubernetes Features
+- **Optionale Tools**:
+  - `k9s`: Für k9s Terminal UI Aktion
+  - `helm`: Für erweiterte Kubernetes Operationen
 
 ### Make-Commands
 ```bash

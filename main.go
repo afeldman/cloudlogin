@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/afeldman/cloudlogin/pkg/awsconfig"
 )
 
 // Build information (set by ldflags during build)
@@ -265,6 +266,25 @@ func testAWSConnection(profile AWSProfile, logFn func(string)) {
 // ---------- GUI ----------
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--update-aws-config":
+			if err := awsconfig.UpdateFromSSO(func(msg string) { fmt.Println(msg) }); err != nil {
+				fmt.Fprintf(os.Stderr, "AWS Config Update fehlgeschlagen: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✅ AWS Config aktualisiert")
+			return
+		case "--sanitize-aws-config":
+			if err := awsconfig.SanitizeConfigFile(func(msg string) { fmt.Println(msg) }); err != nil {
+				fmt.Fprintf(os.Stderr, "AWS Config Bereinigung fehlgeschlagen: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✅ AWS Config bereinigt")
+			return
+		}
+	}
+
 	a := app.NewWithID("de.cloudlogin.tool")
 	w := a.NewWindow("☁️  Cloud Login Manager")
 	w.Resize(fyne.NewSize(900, 650))
@@ -327,6 +347,8 @@ func main() {
 		go testAWSConnection(*selectedAWSProfile, logFn)
 	})
 
+	var awsProfileList *widget.List
+
 	awsRefreshBtn := widget.NewButtonWithIcon("Neu laden", theme.ViewRefreshIcon(), func() {
 		logFn("🔄 AWS Config wird neu geladen...")
 		profiles, err := parseAWSConfig()
@@ -334,10 +356,50 @@ func main() {
 			logFn(fmt.Sprintf("❌ Fehler: %v", err))
 			return
 		}
+		awsProfiles = profiles
+		fyne.Do(func() {
+			awsProfileList.Refresh()
+		})
 		logFn(fmt.Sprintf("✅ %d Profile geladen", len(profiles)))
 	})
 
-	var awsProfileList *widget.List
+	awsUpdateBtn := widget.NewButtonWithIcon("AWS Config aktualisieren", theme.ViewRefreshIcon(), func() {
+		go func() {
+			if err := awsconfig.UpdateFromSSO(logFn); err != nil {
+				logFn(fmt.Sprintf("❌ AWS Config Update fehlgeschlagen: %v", err))
+				return
+			}
+			profiles, err := parseAWSConfig()
+			if err != nil {
+				logFn(fmt.Sprintf("❌ Fehler beim Laden: %v", err))
+				return
+			}
+			awsProfiles = profiles
+			fyne.Do(func() {
+				awsProfileList.Refresh()
+			})
+			logFn(fmt.Sprintf("✅ %d Profile geladen", len(profiles)))
+		}()
+	})
+
+	awsSanitizeBtn := widget.NewButtonWithIcon("AWS Config bereinigen", theme.ContentClearIcon(), func() {
+		go func() {
+			if err := awsconfig.SanitizeConfigFile(logFn); err != nil {
+				logFn(fmt.Sprintf("❌ AWS Config Bereinigung fehlgeschlagen: %v", err))
+				return
+			}
+			profiles, err := parseAWSConfig()
+			if err != nil {
+				logFn(fmt.Sprintf("❌ Fehler beim Laden: %v", err))
+				return
+			}
+			awsProfiles = profiles
+			fyne.Do(func() {
+				awsProfileList.Refresh()
+			})
+			logFn(fmt.Sprintf("✅ %d Profile geladen", len(profiles)))
+		}()
+	})
 	awsProfileList = widget.NewList(
 		func() int { return len(awsProfiles) },
 		func() fyne.CanvasObject {
@@ -380,7 +442,7 @@ func main() {
 
 	awsInfoCard := widget.NewCard("Profil Details", "", awsInfoLabel)
 
-	awsBtnBar := container.NewHBox(awsLoginBtn, awsTestBtn, awsRefreshBtn)
+	awsBtnBar := container.NewHBox(awsLoginBtn, awsTestBtn, awsRefreshBtn, awsUpdateBtn, awsSanitizeBtn)
 
 	awsTab := container.NewBorder(
 		awsBtnBar,
