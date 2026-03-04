@@ -1,6 +1,8 @@
 # Added by goreleaser init:
 dist/
 
+bin/
+
 .DS_Store
 DS_Store?
 
