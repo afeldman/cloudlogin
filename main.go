@@ -1,3 +1,44 @@
+// Package main provides cloudlogin - a multi-mode AWS and Kubernetes credential manager.
+//
+// cloudlogin supports three interaction modes:
+//
+// 1. GUI Mode (Default)
+//
+//	Interactive Fyne-based graphical interface with tabs for AWS authentication,
+//	Kubernetes context switching, and quick actions.
+//
+//	Example:
+//	  go run main.go
+//
+// 2. CLI Mode
+//
+//	Command-line interface for automation and scripts.
+//
+//	Available flags:
+//	  --update-aws-config      Synchronize AWS SSO profiles to ~/.aws/config
+//	  --sanitize-aws-config    Clean invalid characters from ~/.aws/config
+//
+//	Example:
+//	  cloudlogin --update-aws-config
+//
+// 3. TUI Mode
+//
+//	Terminal User Interface (Bubble Tea) for interactive terminal sessions.
+//
+//	Example:
+//	  go run ./cmd/awsconfig-tui/main.go
+//
+// Features:
+//   - AWS SSO profile discovery and caching
+//   - Kubernetes context management
+//   - AWS credential validation
+//   - Configuration file sanitization
+//   - Multi-platform support (macOS, Linux)
+//
+// The application manages configuration files:
+//   - ~/.aws/config        AWS credential profiles
+//   - ~/.kube/config       Kubernetes contexts (KUBECONFIG)
+//   - ~/.aws/sso/cache/*   SSO access tokens
 package main
 
 import (
@@ -18,27 +59,73 @@ import (
 	"github.com/afeldman/cloudlogin/pkg/awsconfig"
 )
 
-// Build information (set by ldflags during build)
+// Build information (set by ldflags during build).
+// These values are injected during compilation via -ldflags.
+//
+// Example build command:
+//
+//	go build -ldflags \
+//	  "-X main.version=v1.0.0 \
+//	   -X main.commit=abc123 \
+//	   -X main.date=2024-01-15" \
+//	  -o cloudlogin main.go
 var (
 	version = "dev"
 	commit  = "unknown"
 	date    = "unknown"
 )
 
-// ---------- Config Parser ----------
-
+// AWSProfile represents a named AWS credential profile from ~/.aws/config.
+//
+// Fields:
+//   - Name: Profile name (e.g., "default", "lynqtech-dev-administratoraccess")
+//   - Region: AWS region (e.g., "eu-central-1", "us-east-1")
+//   - SSOUrl: AWS SSO start URL for authentication
+//
+// Profiles with a non-empty SSOUrl will use SSO authentication via 'aws sso login'.
+// Profiles without SSOUrl use standard AWS credential authentication.
 type AWSProfile struct {
 	Name   string
 	Region string
 	SSOUrl string
 }
 
+// KubeContext represents a Kubernetes context from the KUBECONFIG.
+//
+// Fields:
+//   - Name: Context name (e.g., "kubernetes-admin@cluster.local")
+//   - Cluster: Cluster name
+//   - User: User/authentication identity
+//
+// Contexts are used to switch between multiple Kubernetes clusters
+// without manually updating KUBECONFIG.
 type KubeContext struct {
 	Name    string
 	Cluster string
 	User    string
 }
 
+// parseAWSConfig reads and parses the AWS config file from ~/.aws/config.
+//
+// The function:
+//  1. Opens ~/.aws/config in the user's home directory
+//  2. Parses INI-style profile sections [profile name]
+//  3. Extracts region and sso_start_url from each profile
+//  4. Returns all profiles sorted by name
+//
+// Returns an error if:
+//   - ~/.aws/config does not exist or cannot be read
+//   - INI parsing fails
+//
+// Example:
+//
+//	profiles, err := parseAWSConfig()
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	for _, profile := range profiles {
+//		fmt.Printf("Profile: %s (Region: %s)\n", profile.Name, profile.Region)
+//	}
 func parseAWSConfig() ([]AWSProfile, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -83,6 +170,26 @@ func parseAWSConfig() ([]AWSProfile, error) {
 	return profiles, scanner.Err()
 }
 
+// parseKubeContexts retrieves all available Kubernetes contexts from KUBECONFIG.
+//
+// The function:
+//  1. Reads KUBECONFIG environment variable (defaults to ~/.kube/config)
+//  2. Executes 'kubectl config get-contexts' to list contexts
+//  3. Parses the output to extract context names
+//
+// Returns:
+//   - []KubeContext: List of available Kubernetes contexts
+//   - string: Path to the KUBECONFIG file used
+//   - error: kubectl command error or file parsing error
+//
+// Example:
+//
+//	contexts, kubeconfig, err := parseKubeContexts()
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	fmt.Printf("Using KUBECONFIG: %s\n", kubeconfig)
+//	fmt.Printf("Available contexts: %v\n", contexts)
 func parseKubeContexts() ([]KubeContext, string, error) {
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
@@ -107,6 +214,17 @@ func parseKubeContexts() ([]KubeContext, string, error) {
 	return contexts, kubeconfig, nil
 }
 
+// getCurrentKubeContext returns the currently active Kubernetes context.
+//
+// Executes 'kubectl config current-context' and returns the context name.
+// Returns an empty string if the command fails or no context is set.
+//
+// Example:
+//
+//	current := getCurrentKubeContext()
+//	if current != "" {
+//		fmt.Printf("Current context: %s\n", current)
+//	}
 func getCurrentKubeContext() string {
 	out, err := exec.Command("kubectl", "config", "current-context").Output()
 	if err != nil {
@@ -115,13 +233,30 @@ func getCurrentKubeContext() string {
 	return strings.TrimSpace(string(out))
 }
 
-// ---------- Login Actions ----------
-
+// LoginResult represents the outcome of an authentication or context-switching operation.
+//
+// Fields:
+//   - Success: true if the operation completed without errors
+//   - Message: Detailed message about the operation result
 type LoginResult struct {
 	Success bool
 	Message string
 }
 
+// awsEnv constructs environment variables for AWS CLI commands.
+//
+// Sets:
+//   - AWS_PROFILE: The name of the AWS profile to use
+//   - AWS_REGION: The AWS region from the profile (if set)
+//
+// This is combined with os.Environ() to provide a clean environment
+// for AWS CLI operations.
+//
+// Example:
+//
+//	cmd := exec.Command("aws", "sts", "get-caller-identity")
+//	cmd.Env = awsEnv(profile)
+//	cmd.Run()
 func awsEnv(profile AWSProfile) []string {
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("AWS_PROFILE=%s", profile.Name))
@@ -131,12 +266,46 @@ func awsEnv(profile AWSProfile) []string {
 	return env
 }
 
+// escapeAppleScript escapes special characters in a string for AppleScript compatibility.
+//
+// Escapes:
+//   - Backslashes: \ -> \\
+//   - Quotes: " -> \"
+//
+// This is necessary before embedding a string in an AppleScript tell block.
+//
+// Example:
+//
+//	cmd := "export AWS_PROFILE=dev; aws s3 ls"
+//	escaped := escapeAppleScript(cmd)
+//	// Result: export AWS_PROFILE=dev; aws s3 ls (with any quotes escaped)
 func escapeAppleScript(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\"", "\\\"")
 	return s
 }
 
+// openShellWithEnv opens a new terminal window with the given environment variables.
+//
+// Supported platforms:
+//   - macOS: Uses AppleScript to open Terminal.app
+//   - Linux: Tries x-terminal-emulator, gnome-terminal, konsole, xterm
+//
+// Environment variables should be in the format:
+//   - "export KEY=VALUE"
+//   - "KEY=VALUE"
+//
+// logFn receives status messages during execution.
+//
+// Example:
+//
+//	envLines := []string{
+//		"export AWS_PROFILE=dev",
+//		"export AWS_REGION=eu-central-1",
+//	}
+//	openShellWithEnv(envLines, func(msg string) {
+//		fmt.Println(msg)
+//	})
 func openShellWithEnv(envLines []string, logFn func(string)) {
 	if len(envLines) == 0 {
 		logFn("❌ Keine ENV-Variablen gesetzt")
@@ -199,6 +368,30 @@ func openShellWithEnv(envLines []string, logFn func(string)) {
 	logFn("🖥️  Shell mit ENV geöffnet")
 }
 
+// loginAWS authenticates to AWS using SSO or implicit credentials.
+//
+// Behavior:
+//   - If profile has SSOUrl: Runs 'aws sso login' for SSO authentication
+//   - Otherwise: Runs 'aws sts get-caller-identity' to verify credentials
+//
+// Returns a LoginResult indicating success or failure.
+// logFn receives status messages throughout the process.
+//
+// Example:
+//
+//	profile := AWSProfile{
+//		Name:   "lynqtech-dev",
+//		Region: "eu-central-1",
+//		SSOUrl: "https://lynqtech.awsapps.com/start",
+//	}
+//	result := loginAWS(profile, func(msg string) {
+//		fmt.Println(msg)
+//	})
+//	if result.Success {
+//		fmt.Println("Login successful")
+//	} else {
+//		fmt.Printf("Login failed: %s\n", result.Message)
+//	}
 func loginAWS(profile AWSProfile, logFn func(string)) LoginResult {
 	logFn(fmt.Sprintf("🔐 AWS SSO Login für Profil: %s", profile.Name))
 
@@ -222,6 +415,20 @@ func loginAWS(profile AWSProfile, logFn func(string)) LoginResult {
 	return LoginResult{true, msg}
 }
 
+// switchKubeContext changes the active Kubernetes context.
+//
+// Executes 'kubectl config use-context' to switch the current context.
+// This does not require authentication; it only updates the KUBECONFIG.
+//
+// Returns a LoginResult indicating success or failure.
+// logFn receives status messages throughout the process.
+//
+// Example:
+//
+//	ctx := KubeContext{Name: "prod-cluster"}
+//	result := switchKubeContext(ctx, func(msg string) {
+//		fmt.Println(msg)
+//	})
 func switchKubeContext(ctx KubeContext, logFn func(string)) LoginResult {
 	logFn(fmt.Sprintf("🔄 Wechsle zu Kubernetes Context: %s", ctx.Name))
 	cmd := exec.Command("kubectl", "config", "use-context", ctx.Name)
@@ -235,6 +442,22 @@ func switchKubeContext(ctx KubeContext, logFn func(string)) LoginResult {
 	return LoginResult{true, msg}
 }
 
+// testKubeConnection verifies connectivity to the active Kubernetes cluster.
+//
+// Executes 'kubectl cluster-info' and displays the output.
+// This helps verify that kubectl can reach the cluster API server.
+//
+// logFn receives status messages and cluster information.
+//
+// Example:
+//
+//	testKubeConnection(func(msg string) {
+//		fmt.Println(msg)
+//	})
+//	// Output:
+//	// 🔍 Teste Kubernetes Verbindung...
+//	// Kubernetes control plane is running at https://...
+//	// CoreDNS is running at https://...
 func testKubeConnection(logFn func(string)) {
 	logFn("🔍 Teste Kubernetes Verbindung...")
 	cmd := exec.Command("kubectl", "cluster-info")
@@ -251,6 +474,28 @@ func testKubeConnection(logFn func(string)) {
 	}
 }
 
+// testAWSConnection verifies AWS credentials and access for a given profile.
+//
+// Executes 'aws sts get-caller-identity' with the profile's environment.
+// This checks if the AWS credentials are valid and active.
+//
+// Returns user and account information on success.
+// Returns error message on authentication failure.
+//
+// logFn receives status messages and authentication details.
+//
+// Example:
+//
+//	profile := AWSProfile{
+//		Name:   "dev",
+//		Region: "eu-central-1",
+//	}
+//	testAWSConnection(profile, func(msg string) {
+//		fmt.Println(msg)
+//	})
+//	// Output:
+//	// 🔍 Teste AWS Verbindung für: dev
+//	// ✅ Eingeloggt als: arn:aws:iam::123456789:user/dev-user
 func testAWSConnection(profile AWSProfile, logFn func(string)) {
 	logFn(fmt.Sprintf("🔍 Teste AWS Verbindung für: %s", profile.Name))
 	cmd := exec.Command("aws", "sts", "get-caller-identity", "--output", "text")
@@ -263,8 +508,34 @@ func testAWSConnection(profile AWSProfile, logFn func(string)) {
 	logFn(fmt.Sprintf("✅ Eingeloggt als: %s", strings.TrimSpace(string(output))))
 }
 
-// ---------- GUI ----------
-
+// main is the entry point for cloudlogin.
+//
+// Behavior:
+//  1. If command-line flags provided: Execute CLI mode and exit
+//     - --update-aws-config: Sync SSO profiles
+//     - --sanitize-aws-config: Clean AWS config file
+//  2. Otherwise: Launch GUI mode with Fyne
+//
+// GUI Features:
+//   - AWS Tab: Profile management and SSO login
+//   - Kubernetes Tab: Context switching
+//   - Quick Actions: Browser links, shell commands
+//   - Integrated logging console
+//
+// Exit codes:
+//   - 0: Success
+//   - 1: CLI command failed
+//
+// Example CLI usage:
+//
+//	$ cloudlogin --update-aws-config
+//	🔄 AWS Config aktualisieren...
+//	✅ AWS Config aktualisiert
+//
+// Example GUI usage:
+//
+//	$ cloudlogin
+//	# Opens interactive GUI window
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {

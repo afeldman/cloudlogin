@@ -1,3 +1,33 @@
+// Package awsconfig provides AWS SSO profile management and AWS config file operations.
+//
+// This package handles:
+//   - AWS SSO profile discovery (accounts and roles via AWS SSO API)
+//   - AWS config file parsing and updates
+//   - Configuration file sanitization (removing invalid characters)
+//   - Token caching and expiration handling
+//
+// Core Functions:
+//   - UpdateFromSSO: Synchronize AWS profiles from SSO to ~/.aws/config
+//   - SanitizeConfigFile: Remove invalid characters from AWS config
+//
+// Example usage:
+//
+//	logFn := func(msg string) { fmt.Println(msg) }
+//
+//	// Update AWS profiles from SSO
+//	if err := UpdateFromSSO(logFn); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Sanitize config file  (remove invalid characters)
+//	if err := SanitizeConfigFile(logFn); err != nil {
+//		log.Fatal(err)
+//	}
+//
+// The package uses callback-based logging (logFn) to support multiple UI modes:
+// - GUI (Fyne): Updates log display in real-time
+// - CLI: Prints to stdout/stderr
+// - TUI (Bubble Tea): Sends log messages through channels
 package awsconfig
 
 import (
@@ -12,12 +42,14 @@ import (
 	"time"
 )
 
+// ssoCacheEntry represents an entry from ~/.aws/sso/cache/*.json
 type ssoCacheEntry struct {
 	StartURL    string `json:"startUrl"`
 	AccessToken string `json:"accessToken"`
 	ExpiresAt   string `json:"expiresAt"`
 }
 
+// awsSSOAccount represents an AWS account from SSO API response
 type awsSSOAccount struct {
 	AccountID   string `json:"accountId"`
 	AccountName string `json:"accountName"`
@@ -28,6 +60,7 @@ type awsSSOAccountsResponse struct {
 	NextToken   string          `json:"nextToken"`
 }
 
+// awsSSORole represents an AWS role from SSO API response
 type awsSSORole struct {
 	RoleName string `json:"roleName"`
 }
@@ -37,6 +70,7 @@ type awsSSORolesResponse struct {
 	NextToken string       `json:"nextToken"`
 }
 
+// awsProfileEntry represents a single AWS profile to be written to config file
 type awsProfileEntry struct {
 	Name        string
 	AccountID   string
@@ -51,7 +85,30 @@ const (
 	awsConfigEndTag    = "# cloudlogin-managed-end"
 )
 
-// SanitizeConfigFile removes non-printable characters from ~/.aws/config and writes a backup.
+// SanitizeConfigFile removes non-printable characters from ~/.aws/config.
+//
+// This fixes "Unable to parse config file" errors caused by invisible bytes
+// (control characters 0x00-0x1F except tab/newline/CR) embedded in the file.
+//
+// Behavior:
+//  1. Reads ~/.aws/config
+//  2. Removes all non-printable characters
+//  3. Creates backup as ~/.aws/config.bak if changes needed
+//  4. Writes cleaned version preserving original file permissions
+//  5. Returns early if no cleaning needed
+//
+// logFn receives status messages during the process.
+// Returns error if file cannot be read or written.
+//
+// Example:
+//
+//	err := SanitizeConfigFile(func(msg string) {
+//		fmt.Println(msg)
+//	})
+//	// May output:
+//	// "✅ AWS Config bereinigt (Backup: ~/.aws/config.bak)"
+//	// or
+//	// "✅ AWS Config ist bereits sauber"
 func SanitizeConfigFile(logFn func(string)) error {
 	configPath := filepath.Join(os.Getenv("HOME"), ".aws", "config")
 	existing, err := os.ReadFile(configPath)
@@ -85,7 +142,36 @@ func SanitizeConfigFile(logFn func(string)) error {
 	return nil
 }
 
-// UpdateFromSSO regenerates the managed section in ~/.aws/config using AWS SSO data.
+// UpdateFromSSO synchronizes AWS SSO profiles to ~/.aws/config.
+//
+// This function:
+//  1. Retrieves SSO access token from ~/.aws/sso/cache/
+//  2. Lists all AWS accounts available via SSO
+//  3. Lists all roles for each account
+//  4. Generates profile names: {account-name}-{role-name}
+//  5. Reads existing ~/.aws/config
+//  6. Merges: Preserves non-managed profiles, updates managed section
+//  7. Sanitizes invalid characters
+//  8. Writes back with original permissions
+//
+// Environment variables:
+//   - AWS_SSO_REGION: Override default SSO region (default: eu-central-1)
+//   - AWS_SSO_START_URL: Override SSO start URL (default: lynqtech)
+//
+// logFn is called with progress messages and status updates.
+// Returns error if SSO token missing, AWS API fails, or file I/O error.
+//
+// Example:
+//
+//	err := UpdateFromSSO(func(msg string) {
+//		fmt.Println(msg)
+//	})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	// Output:
+//	// 🔄 AWS Config aktualisieren (SSO: https://lynqtech.awsapps.com/start)
+//	// ✅ AWS Config aktualisiert
 func UpdateFromSSO(logFn func(string)) error {
 	region := getEnvOrDefault("AWS_SSO_REGION", defaultSSORegion)
 	startURL := getEnvOrDefault("AWS_SSO_START_URL", defaultSSOStartURL)
@@ -132,9 +218,18 @@ func UpdateFromSSO(logFn func(string)) error {
 		logFn(fmt.Sprintf("❌ %v", err))
 		return err
 	}
+	logFn(fmt.Sprintf("✅ AWS Config aktualisiert"))
 	return nil
 }
 
+// getEnvOrDefault retrieves an environment variable or returns a default value.
+//
+// Returns the trimmed environment variable if non-empty, otherwise returns fallback.
+// Useful for optional configuration that should have sensible defaults.
+//
+// Example:
+//
+//	region := getEnvOrDefault("AWS_SSO_REGION", "eu-central-1")
 func getEnvOrDefault(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -142,6 +237,25 @@ func getEnvOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// findSSOToken retrieves the current SSO access token from ~/.aws/sso/cache/.
+//
+// Search process:
+//  1. Scans all *.json files in ~/.aws/sso/cache/
+//  2. Parses startUrl, accessToken, and expiresAt
+//  3. Filters for tokens matching the given startURL
+//  4. Selects token with latest expiresAt (prefers non-expired)
+//
+// Returns the access token string or error if:
+//   - No cache files found
+//   - No tokens for the given startURL
+//   - All tokens are expired
+//
+// Example:
+//
+//	token, err := findSSOToken("https://lynqtech.awsapps.com/start")
+//	if err != nil {
+//		log.Fatal("SSO token not found:", err)
+//	}
 func findSSOToken(startURL string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -190,6 +304,31 @@ func findSSOToken(startURL string) (string, error) {
 	return bestToken, nil
 }
 
+// listSSOAccounts retrieves all AWS accounts available via SSO API with pagination support.
+//
+// API Call: aws sso list-accounts
+//
+// Parameters:
+//   - accessToken: SSO access token from cache
+//   - region: AWS region for SSOregion (usually eu-central-1)
+//
+// Behavior:
+//  1. Makes paginated requests to AWS SSO API
+//  2. Handles nextToken for accounts > 100
+//  3. Filters and sorts by account ID
+//  4. Returns slice of all available accounts
+//
+// Returns error if AWS CLI fails or JSON parsing error.
+//
+// Example:
+//
+//	accounts, err := listSSOAccounts(token, "eu-central-1")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	for _, acct := range accounts {
+//		fmt.Printf("Account: %s (%s)\n", acct.AccountName, acct.AccountID)
+//	}
 func listSSOAccounts(accessToken, region string) ([]awsSSOAccount, error) {
 	var accounts []awsSSOAccount
 	var nextToken string
@@ -218,6 +357,30 @@ func listSSOAccounts(accessToken, region string) ([]awsSSOAccount, error) {
 	return accounts, nil
 }
 
+// listSSOProfileEntries generates AWS profile entries from accounts and roles.
+//
+// This function:
+//  1. Iterates through all accounts
+//  2. Lists roles for each account via AWS SSO API
+//  3. Generates profile name: {account-name}-{role-name} (slugified)
+//  4. Handles duplicate names by appending numeric suffix
+//  5. Returns list of complete profile entries with metadata
+//
+// Profile names are slugified:
+//   - Lowercase
+//   - Spaces and special chars converted to hyphens
+//   - Examples: "Lynqtech Dev" -> "lynqtech-dev"
+//     "AdministratorAccess" -> "administratoraccess"
+//
+// Returns error if AWS API calls fail for any account/role.
+//
+// Example:
+//
+//	accounts := []awsSSOAccount{
+//		{AccountID: "123456", AccountName: "Prod"},
+//	}
+//	entries, err := listSSOProfileEntries(token, "eu-central-1", accounts)
+//	// entries[0].Name = "prod-administratoraccess"
 func listSSOProfileEntries(accessToken, region string, accounts []awsSSOAccount) ([]awsProfileEntry, error) {
 	var entries []awsProfileEntry
 	seen := make(map[string]bool)
@@ -254,6 +417,32 @@ func listSSOProfileEntries(accessToken, region string, accounts []awsSSOAccount)
 	return entries, nil
 }
 
+// listSSORoles retrieves all AWS roles for a specific account via SSO API with pagination.
+//
+// API Call: aws sso list-account-roles --account-id {id}
+//
+// Parameters:
+//   - accessToken: SSO access token from cache
+//   - region: AWS region for SSO service
+//   - accountID: AWS account ID to list roles for
+//
+// Returns:
+//   - []awsSSORole: All available roles for the account
+//   - error: AWS API error or JSON parsing error
+//
+// Pagination:
+//   - Supports nextToken for accounts with >100 roles (rare)
+//   - Automatically handles multiple API calls if needed
+//
+// Example:
+//
+//	roles, err := listSSORoles(token, "eu-central-1", "123456789")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	for _, role := range roles {
+//		fmt.Printf("Role: %s\n", role.RoleName)
+//	}
 func listSSORoles(accessToken, region, accountID string) ([]awsSSORole, error) {
 	var roles []awsSSORole
 	var nextToken string
@@ -282,6 +471,33 @@ func listSSORoles(accessToken, region, accountID string) ([]awsSSORole, error) {
 	return roles, nil
 }
 
+// runAWSJSON executes an AWS CLI command and returns parsed JSON output.
+//
+// This is a helper function that:
+//  1. Executes 'aws' command with given arguments
+//  2. Uses filtered environment to avoid profile/region interference
+//  3. Masks sensitive arguments (--access-token) in error messages
+//  4. Returns combined stdout/stderr as JSON bytes
+//
+// Parameters:
+//   - args: Command and arguments (e.g., "sso", "list-accounts", "--output", "json")
+//
+// Returns:
+//   - []byte: Raw JSON output from AWS CLI
+//   - error: Command execution error with masked sensitive data
+//
+// Security:
+//   - Access tokens replaced with *** in error messages
+//   - Never leaks credentials to logs
+//
+// Example:
+//
+//	data, err := runAWSJSON("sso", "list-accounts", "--output", "json")
+//	if err != nil {
+//		// Error message will show: aws sso list-accounts --output json: ...
+//		// NOT: aws sso list-accounts ... --access-token abc123
+//		log.Fatal(err)
+//	}
 func runAWSJSON(args ...string) ([]byte, error) {
 	cmd := exec.Command("aws", args...)
 	cmd.Env = awsSSOEnv()
@@ -297,6 +513,26 @@ func runAWSJSON(args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// awsSSOEnv returns a filtered environment for AWS CLI commands.
+//
+// This environment:
+//   - Removes AWS_PROFILE to prevent "profile not found" errors
+//   - Removes AWS_DEFAULT_PROFILE for the same reason
+//   - Uses a temporary empty AWS_CONFIG_FILE to bypass broken config files
+//   - Preserves all other environment variables
+//
+// Rationale:
+//   - If user's ~/.aws/config is corrupted, AWS CLI will fail to read any profiles
+//   - Using a temp empty config prevents the CLI from trying to parse it
+//   - The SSO endpoints don't need the config file; they get credentials from cache
+//
+// Returns []string representing filtered environment for os/exec Command.
+//
+// Example:
+//
+//	cmd := exec.Command("aws", "sso", "list-accounts")
+//	cmd.Env = awsSSOEnv()  // Safe environment
+//	cmd.Run()
 func awsSSOEnv() []string {
 	base := filterEnv(os.Environ(), "AWS_PROFILE", "AWS_DEFAULT_PROFILE")
 	configFile, cleanup := tempAWSConfigFile()
