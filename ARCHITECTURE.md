@@ -2,102 +2,137 @@
 
 ## Überblick
 
-Das Cloud Login Manager ist now mit einer erweiterbaren Plugin-Architektur aufgebaut, die es einfach macht, neue Cloud-Provider (AWS, Azure, GCP, etc.) hinzuzufügen.
+Das Cloud Login Manager Tool ist eine **multi-modale** Anwendung mit drei Einstiegspunkten:
 
-## Struktur
+1. **GUI** (`main.go`): Fyne-basierte Desktop-Oberfläche mit Tabs
+2. **CLI** (`main.go` --flags): Command-Line Interface für Automatisierung
+3. **TUI** (`cmd/awsconfig-tui/main.go`): Bubble Tea Terminal UI für interaktive Sessions
+
+Alle Modi nutzen gemeinsame Business Logic aus dem `pkg/awsconfig` Package für:
+- AWS SSO Config Management
+- Environment Handling
+- Config File Sanitization
+
+## Code-Struktur
 
 ```
-pkg/provider/
-├── provider.go           # Interface Definitionen
-├── aws/
-│   └── aws.go           # AWS Provider Implementierung
-├── azure/
-│   └── azure.go         # Azure Provider Implementierung (Template)
-└── kubernetes/
-    └── kubernetes.go    # Kubernetes Context Handler
+cloudlogin/
+├── main.go                          # GUI Entry Point (Fyne) + CLI Dispatcher
+├── cmd/
+│   └── awsconfig-tui/
+│       └── main.go                  # TUI Entry Point (Bubble Tea)
+├── pkg/
+│   ├── awsconfig/
+│   │   ├── sso_config.go           # SSO Config Management Logic
+│   │   │   ├── UpdateFromSSO()
+│   │   │   ├── SanitizeConfigFile()
+│   │   │   ├── findSSOToken()
+│   │   │   ├── listSSOAccounts()
+│   │   │   └── listSSORoles()
+│   │   └── README.md               # Package Dokumentation
+│   └── provider/                    # (Legacy) Plugin Architecture
+│       ├── aws/
+│       ├── azure/
+│       └── kubernetes/
+└── Makefile                         # Build Targets für alle Modi
 ```
 
-## Interfaces
+## Workflow: Von Feature bis zu allen Modi
 
-### CloudProvider Interface
+### 1. Feature als Package-Funktion implementieren (`pkg/awsconfig/`)
 
-Jeder Cloud-Provider muss das `CloudProvider` Interface implementieren:
+Alle neue Features sollten als Funktionen in `pkg/awsconfig` implementiert werden mit:
+- Signatur: `func FeatureName(logFn func(string)) error`
+- Logging via `logFn()` - kein direktes fmt.Println
+- Rückgabe von `error` für Fehlerbehandlung
 
+Beispiel:
 ```go
-type CloudProvider interface {
-    Name() string                                          // Name des Providers (z.B. "AWS", "Azure")
-    GetCredentials() ([]Credential, error)                // Hole alle verfügbaren Credentials
-    Login(credential string, logFn func(string)) LoginResult // Führe Login durch
-    TestConnection(logFn func(string))                     // Teste Verbindung
+package awsconfig
+
+func UpdateFromSSO(logFn func(string)) error {
+    logFn("🔍 Suche SSO Token...")
+    // ... implementation ...
+    logFn("✅ SSO Config aktualisiert")
+    return nil
 }
 ```
 
-### ContextHandler Interface
+### 2. GUI Integration (`main.go`)
 
-Für Kontext-basierte Services (z.B. Kubernetes):
-
+Aufrufen in einem Goroutine mit GUI-spezifischem Logging:
 ```go
-type ContextHandler interface {
-    Name() string                                         // Name des Handlers (z.B. "Kubernetes")
-    GetCurrentContext() string                            // Aktueller Kontext
-    GetContexts() ([]Context, error)                      // Alle verfügbaren Kontexte
-    SwitchContext(contextName string, logFn func(string)) LoginResult
-    TestConnection(logFn func(string))
+awsUpdateBtn := widget.NewButtonWithIcon("AWS Config aktualisieren", theme.CheckIcon(), func() {
+    go func() {
+        if err := awsconfig.UpdateFromSSO(logFn); err != nil {
+            logFn(fmt.Sprintf("❌ Fehler: %v", err))
+            return
+        }
+        // ggfs Profile neu laden
+    }()
+})
+```
+
+### 3. CLI Integration (`main.go` main() start)
+
+Hinzufügen als Command-Line Flag:
+```go
+func main() {
+    if len(os.Args) > 1 {
+        switch os.Args[1] {
+        case "--update-aws-config":
+            if err := awsconfig.UpdateFromSSO(func(msg string) { fmt.Println(msg) }); err != nil {
+                fmt.Fprintf(os.Stderr, "Fehler: %v\n", err)
+                os.Exit(1)
+            }
+            return
+        }
+    }
+    // ... weiterer Code ...
 }
 ```
 
-## Neue Provider hinzufügen
+### 4. TUI Integration (`cmd/awsconfig-tui/main.go`)
 
-### Beispiel: GCP Provider
+Aufrufen mit Channel-basiertem Logging für Live-Updates:
+```go
+func (m model) Init() tea.Cmd {
+    return listenLogCmd(m.logCh)
+}
 
-1. **Ordner erstellen:**
-   ```bash
-   mkdir -p pkg/provider/gcp
-   ```
+func startUpdate(logCh chan tea.Msg) {
+    go func() {
+        logFn := func(msg string) {
+            logCh <- logMsg(msg)
+        }
+        if err := awsconfig.UpdateFromSSO(logFn); err != nil {
+            logCh <- doneMsg{err}
+        } else {
+            logCh <- doneMsg{nil}
+        }
+    }()
+}
+```
 
-2. **Provider implementieren:**
-   ```go
-   // pkg/provider/gcp/gcp.go
-   package gcp
+## AWS SSO Config Management (`pkg/awsconfig/`)
 
-   import (
-       "github.com/afeldman/cloudlogin/pkg/provider"
-   )
+### UpdateFromSSO() Flow
 
-   type GCPProvider struct {}
-
-   func NewGCPProvider() *GCPProvider {
-       return &GCPProvider{}
-   }
-
-   func (g *GCPProvider) Name() string {
-       return "GCP"
-   }
-
-   func (g *GCPProvider) GetCredentials() ([]provider.Credential, error) {
-       // Implementiere GCP Projekte Auslesen
-       return nil, nil
-   }
-
-   func (g *GCPProvider) Login(projectID string, logFn func(string)) provider.LoginResult {
-       // Implementiere GCP Auth
-       return provider.LoginResult{}
-   }
-
-   func (g *GCPProvider) TestConnection(logFn func(string)) {
-       // Teste GCP Verbindung
-   }
-   ```
-
-3. **In main.go registrieren:**
-   ```go
-   import "github.com/afeldman/cloudlogin/pkg/provider/gcp"
-
-   func NewProviderManager() *ProviderManager {
-       pm := &ProviderManager{
-           providers: make(map[string]provider.CloudProvider),
-       }
-       pm.RegisterProvider(aws.NewAWSProvider())
+```
+findSSOToken()
+    ↓
+listSSOAccounts() [AWS API call]
+    ↓
+listSSORoles() [AWS API call pro Account]
+    ↓
+Build config string with profile definitions
+    ↓
+Read existing ~/.aws/config
+    ↓
+Merge: Keep non-managed sections, update managed section
+    ↓
+Write back with preserved permissions
+```
        pm.RegisterProvider(azure.NewAzureProvider())
        pm.RegisterProvider(gcp.NewGCPProvider())  // ← Hinzufügen
        return pm

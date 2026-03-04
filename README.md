@@ -139,33 +139,124 @@ Logs zeigen:
   - `k9s`: Für k9s Terminal UI Aktion
   - `helm`: Für erweiterte Kubernetes Operationen
 
-### Make-Commands
+## Entwicklung
+
+### Build & Run
+
 ```bash
-make build        # Binary bauen
-make run          # Build und Run
-make test         # Tests ausführen
-make deps         # Dependencies herunterladen und tidyen
-make clean        # Artifacts löschen
-make help         # Hilfemeldung anzeigen
+# GUI bauen und starten
+make build
+./cloudlogin
+
+# Oder direkt mit make
+make run
+
+# Tests ausführen
+make test
+
+# Dependencies aktualisieren
+make deps
+
+# Cleanup
+make clean
+
+# Hilfe anzeigen
+make help
 ```
 
-### Architektur
+### Dependencies verstehen
 
-Das Projekt ist mit einer erweiterbaren **Plugin-Architektur** aufgebaut:
+Das Projekt nutzt zwei verschiedene UI-Frameworks:
 
-- **Cloud Provider Interface**: Einfach neue Provider (AWS, Azure, GCP, etc.) hinzufügen
-- **Context Handler**: Für Kontext-basierte Services wie Kubernetes
-- **Dynamische GUI**: Tabs werden automatisch aus registrierten Providern generiert
+1. **Fyne v2** (GUI)
+   - Cross-platform Desktop GUI
+   - Verwendet in `main.go`
+   - Benötigt CGO_ENABLED=1
 
-Lese [ARCHITECTURE.md](ARCHITECTURE.md) für Details wie du neue Provider hinzufügst.
+2. **Bubble Tea v0.26.6** (TUI)
+   - Terminal User Interface Framework
+   - Verwendet in `cmd/awsconfig-tui/main.go`
+   - Portable, nur Stdlib
 
-### Vorhandene Provider
+### Neue Features hinzufügen
 
-- ✅ **AWS**: SSO Login, Credential Management, Verbindungstests
-- 📋 **Azure**: Template vorhanden, Implementierung in Arbeit
-- ✅ **Kubernetes**: Context Switching, Verbindungstests
+#### In `pkg/awsconfig` Funktionen hinzufügen
+1. Implementiere neue Funktion mit `logFn func(string)` Parameter
+2. Funktion wird von GUI, CLI und TUI verwendet
+3. Callbacks ermöglichen Logging in allen Modi
 
-### Releases mit GoReleaser
+Beispiel:
+```go
+func MyNewFunction(logFn func(string)) error {
+    logFn("ℹ️  Verarbeite...")
+    // ...
+    logFn("✅ Fertig")
+    return nil
+}
+```
+
+#### Von GUI aufrufen
+```go
+go func() {
+    if err := awsconfig.MyNewFunction(logFn); err != nil {
+        logFn(fmt.Sprintf("❌ Fehler: %v", err))
+        return
+    }
+}()
+```
+
+#### Von CLI aufrufen
+```go
+case "--my-feature":
+    if err := awsconfig.MyNewFunction(func(msg string) { fmt.Println(msg) }); err != nil {
+        fmt.Fprintf(os.Stderr, "Fehler: %v\n", err)
+        os.Exit(1)
+    }
+    return
+```
+
+### Troubleshooting
+
+**Problem**: Build schlägt mit CGO-Fehler fehl
+```bash
+# Lösung: CGO aktivieren
+export CGO_ENABLED=1
+make build
+```
+
+**Problem**: `aws sso login` schlägt mit "Unable to parse config file" fehl
+```bash
+# Lösung 1: AWS Config bereinigen
+./cloudlogin --sanitize-aws-config
+
+# Lösung 2: Via GUI
+./cloudlogin  # -> AWS Tab -> "AWS Config bereinigen"
+
+# Lösung 3: Via TUI
+./bin/cloudlogin-awsconfig-tui
+```
+
+**Problem**: Kubernetes Contexts werden nicht angezeigt
+```bash
+# Überprüfe KUBECONFIG
+echo $KUBECONFIG
+kubectl config get-contexts
+```
+
+
+
+## Documentation
+
+Umfassende Dokumentation für verschiedene Zwecke:
+
+| Dokument | Zielgruppe | Inhalt |
+|----------|-----------|---------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Entwickler | Multi-Mode Architektur, Feature-Integration, Workflow |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | Entwickler | Environment Setup, Development Workflow, Debugging |
+| [pkg/awsconfig/README.md](pkg/awsconfig/README.md) | Entwickler | AWS SSO Package API, Funktionen, Error Handling |
+| [cmd/awsconfig-tui/README.md](cmd/awsconfig-tui/README.md) | Entwickler | TUI Architektur, Bubble Tea Integration, Troubleshooting |
+
+## Releases mit GoReleaser
 
 Das Projekt nutzt **GoReleaser mit separaten Konfigurationen** für verschiedene Plattformen:
 
