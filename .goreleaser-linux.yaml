@@ -8,7 +8,7 @@ before:
 
 builds:
   - id: cloudlogin-linux
-    main: ./main.go
+    main: .
     env:
       - CGO_ENABLED=1
     goos:
