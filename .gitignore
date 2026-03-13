@@ -3,8 +3,14 @@ dist/
 
 bin/
 
+# macOS app bundle (built artifact)
+*.app
+*.app.bak
+
 .DS_Store
 DS_Store?
+
+claudlogin
 
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore

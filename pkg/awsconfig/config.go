@@ -163,6 +163,12 @@ func UpdateFromSSO(logFn func(string)) error {
 	existing, _ := os.ReadFile(configPath)
 	merged := mergeAWSConfig(sanitizeConfig(string(existing)), buildAWSConfig(entries, region, startURL))
 
+	if err := createBackup(configPath); err != nil {
+		logFn(fmt.Sprintf("⚠️  Backup fehlgeschlagen: %v", err))
+	} else {
+		logFn(fmt.Sprintf("💾 Backup: %s.bak", configPath))
+	}
+
 	mode := os.FileMode(0o600)
 	if info, err := os.Stat(configPath); err == nil {
 		mode = info.Mode()
@@ -171,7 +177,7 @@ func UpdateFromSSO(logFn func(string)) error {
 		logFn(fmt.Sprintf("❌ %v", err))
 		return err
 	}
-	logFn(fmt.Sprintf("✅ AWS Config aktualisiert"))
+	logFn("✅ AWS Config aktualisiert")
 	return nil
 }
 

@@ -13,6 +13,18 @@ import (
 // Example:
 //
 //	region := getEnvOrDefault("AWS_SSO_REGION", "eu-central-1")
+// createBackup copies src to src+".bak", overwriting any previous backup.
+func createBackup(src string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to back up
+		}
+		return err
+	}
+	return os.WriteFile(src+".bak", data, 0o600)
+}
+
 func getEnvOrDefault(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v

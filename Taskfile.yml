@@ -1,0 +1,99 @@
+version: "3"
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  DATE:
+    sh: date -u '+%Y-%m-%dT%H:%M:%SZ'
+  LDFLAGS: '-s -w -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.date={{.DATE}}'
+  BINARY: cloudlogin
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmd: task --list
+
+  build:
+    desc: Build cloudlogin binary (CGO required for Fyne)
+    cmds:
+      - CGO_ENABLED=1 go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} .
+    sources:
+      - "**/*.go"
+      - go.mod
+    generates:
+      - "{{.BINARY}}"
+
+  run:
+    desc: Build and run cloudlogin GUI
+    deps: [build]
+    cmd: ./{{.BINARY}}
+
+  test:
+    desc: Run all tests
+    cmd: go test -v ./...
+
+  test-short:
+    desc: Run tests without external dependencies
+    cmd: go test -short ./...
+
+  lint:
+    desc: Run go vet
+    cmd: go vet ./...
+
+  deps:
+    desc: Download and tidy dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}} {{.BINARY}}.exe
+      - rm -rf dist/
+
+  # ── macOS App Bundle ────────────────────────────────────────────────────────
+
+  package:
+    desc: "Create cloudlogin.app bundle for macOS (proper Dock icon, double-click launch)"
+    cmds:
+      - ~/go/bin/fyne package -os darwin -icon logo.png -name "cloudlogin" -appID de.cloudlogin.tool
+    env:
+      CGO_ENABLED: "1"
+    sources:
+      - "**/*.go"
+      - logo.png
+    generates:
+      - cloudlogin.app
+
+  # ── GoReleaser ──────────────────────────────────────────────────────────────
+
+  snapshot:
+    desc: Local snapshot build (macOS, no publish)
+    cmds:
+      - goreleaser release --snapshot --clean --config .goreleaser.yaml
+    env:
+      CGO_ENABLED: "1"
+
+  snapshot-linux:
+    desc: Local snapshot build (Linux, no publish)
+    cmds:
+      - goreleaser release --snapshot --clean --config .goreleaser-linux.yaml
+    env:
+      CGO_ENABLED: "1"
+
+  release:
+    desc: "Release to GitHub (requires: git tag vX.Y.Z && GITHUB_TOKEN)"
+    cmds:
+      - goreleaser release --clean --config .goreleaser.yaml
+    env:
+      CGO_ENABLED: "1"
+
+  release-linux:
+    desc: "Release Linux build to GitHub (run on Linux CI)"
+    cmds:
+      - goreleaser release --clean --config .goreleaser-linux.yaml
+    env:
+      CGO_ENABLED: "1"

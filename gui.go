@@ -13,12 +13,20 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	cloudaws "github.com/afeldman/cloudlogin/internal/aws"
+	"github.com/afeldman/cloudlogin/internal/kube"
+	"github.com/afeldman/cloudlogin/internal/shell"
 	"github.com/afeldman/cloudlogin/pkg/awsconfig"
 )
 
 func runGUI() {
+	icon := fyne.NewStaticResource("logo.png", appIcon)
+
 	a := app.NewWithID("de.cloudlogin.tool")
+	a.SetIcon(icon)
 	w := a.NewWindow("☁️  Cloud Login Manager")
+	w.SetIcon(icon)
 	w.Resize(fyne.NewSize(900, 650))
 
 	// Log-Bereich mit RichText für besseres Styling
@@ -51,12 +59,12 @@ func runGUI() {
 	})
 
 	// -------- AWS Tab --------
-	awsProfiles, err := parseAWSConfig()
+	awsProfiles, err := cloudaws.ParseAWSConfig()
 	if err != nil {
-		awsProfiles = []AWSProfile{}
+		awsProfiles = []cloudaws.AWSProfile{}
 	}
 
-	var selectedAWSProfile *AWSProfile
+	var selectedAWSProfile *cloudaws.AWSProfile
 	awsInfoLabel := widget.NewLabel("Kein Profil ausgewählt")
 	awsInfoLabel.Wrapping = fyne.TextWrapWord
 
@@ -66,7 +74,7 @@ func runGUI() {
 			return
 		}
 		go func() {
-			loginAWS(*selectedAWSProfile, logFn)
+			cloudaws.LoginAWS(*selectedAWSProfile, logFn)
 		}()
 	})
 	awsLoginBtn.Importance = widget.HighImportance
@@ -76,14 +84,14 @@ func runGUI() {
 			dialog.ShowInformation("Hinweis", "Bitte zuerst ein AWS Profil auswählen", w)
 			return
 		}
-		go testAWSConnection(*selectedAWSProfile, logFn)
+		go cloudaws.TestAWSConnection(*selectedAWSProfile, logFn)
 	})
 
 	var awsProfileList *widget.List
 
 	awsRefreshBtn := widget.NewButtonWithIcon("Neu laden", theme.ViewRefreshIcon(), func() {
 		logFn("🔄 AWS Config wird neu geladen...")
-		profiles, err := parseAWSConfig()
+		profiles, err := cloudaws.ParseAWSConfig()
 		if err != nil {
 			logFn(fmt.Sprintf("❌ Fehler: %v", err))
 			return
@@ -101,7 +109,7 @@ func runGUI() {
 				logFn(fmt.Sprintf("❌ AWS Config Update fehlgeschlagen: %v", err))
 				return
 			}
-			profiles, err := parseAWSConfig()
+			profiles, err := cloudaws.ParseAWSConfig()
 			if err != nil {
 				logFn(fmt.Sprintf("❌ Fehler beim Laden: %v", err))
 				return
@@ -120,7 +128,7 @@ func runGUI() {
 				logFn(fmt.Sprintf("❌ AWS Config Bereinigung fehlgeschlagen: %v", err))
 				return
 			}
-			profiles, err := parseAWSConfig()
+			profiles, err := cloudaws.ParseAWSConfig()
 			if err != nil {
 				logFn(fmt.Sprintf("❌ Fehler beim Laden: %v", err))
 				return
@@ -174,7 +182,48 @@ func runGUI() {
 
 	awsInfoCard := widget.NewCard("Profil Details", "", awsInfoLabel)
 
-	awsBtnBar := container.NewHBox(awsLoginBtn, awsTestBtn, awsRefreshBtn, awsUpdateBtn, awsSanitizeBtn)
+	// Vorab deklariert, damit die Sync-Button-Closures darauf zugreifen können
+	// (werden unten beim Kubernetes-Tab initialisiert)
+	var (
+		kubeContexts  []kube.KubeContext
+		kubePathLabel *widget.Label
+		kubeCtxList   *widget.List
+	)
+
+	// AWS/Kube Sync Buttons
+	awsSyncCheckBtn := widget.NewButtonWithIcon("Sync Status prüfen", theme.InfoIcon(), func() {
+		go func() {
+			synced, message, missingKube, missingAWS := cloudaws.CheckSyncStatus(logFn)
+			if synced {
+				dialog.ShowInformation("Sync Status", message, w)
+			} else {
+				// Show detailed dialog with sync options
+				showSyncDialog(w, message, missingKube, missingAWS, logFn, kubeCtxList)
+			}
+		}()
+	})
+
+	awsSyncBtn := widget.NewButtonWithIcon("AWS/Kube synchronisieren", theme.ViewRefreshIcon(), func() {
+		go func() {
+			result := cloudaws.SyncAWSKube(logFn)
+			if result.Success {
+				dialog.ShowInformation("Synchronisierung", result.Message, w)
+				// Refresh Kubernetes contexts after sync
+				ctxs, path, err := kube.ParseKubeContexts()
+				if err == nil {
+					kubeContexts = ctxs
+					fyne.Do(func() {
+						kubePathLabel.SetText(fmt.Sprintf("KUBECONFIG: %s", path))
+						kubeCtxList.Refresh()
+					})
+				}
+			} else {
+				dialog.ShowError(fmt.Errorf("Synchronisierung fehlgeschlagen: %s", result.Message), w)
+			}
+		}()
+	})
+
+	awsBtnBar := container.NewHBox(awsLoginBtn, awsTestBtn, awsRefreshBtn, awsUpdateBtn, awsSanitizeBtn, awsSyncCheckBtn, awsSyncBtn)
 
 	awsTab := container.NewBorder(
 		awsBtnBar,
@@ -186,13 +235,14 @@ func runGUI() {
 	)
 
 	// -------- Kubernetes Tab --------
-	kubeContexts, kubeconfigPath, _ := parseKubeContexts()
-	currentCtx := getCurrentKubeContext()
+	var kubeconfigPath string
+	kubeContexts, kubeconfigPath, _ = kube.ParseKubeContexts()
+	currentCtx := kube.GetCurrentKubeContext()
 
-	kubePathLabel := widget.NewLabel(fmt.Sprintf("KUBECONFIG: %s", kubeconfigPath))
+	kubePathLabel = widget.NewLabel(fmt.Sprintf("KUBECONFIG: %s", kubeconfigPath))
 	kubePathLabel.Wrapping = fyne.TextWrapWord
 
-	var selectedKubeCtx *KubeContext
+	var selectedKubeCtx *kube.KubeContext
 	kubeInfoLabel := widget.NewLabel("Kein Context ausgewählt")
 	kubeCurrentLabel := widget.NewLabelWithStyle(
 		fmt.Sprintf("Aktueller Context: %s", currentCtx),
@@ -206,7 +256,7 @@ func runGUI() {
 			return
 		}
 		go func() {
-			result := switchKubeContext(*selectedKubeCtx, logFn)
+			result := kube.SwitchKubeContext(*selectedKubeCtx, logFn)
 			if result.Success {
 				fyne.Do(func() {
 					kubeCurrentLabel.SetText(fmt.Sprintf("Aktueller Context: %s", selectedKubeCtx.Name))
@@ -217,12 +267,12 @@ func runGUI() {
 	kubeSwitchBtn.Importance = widget.HighImportance
 
 	kubeTestBtn := widget.NewButtonWithIcon("Verbindung testen", theme.ConfirmIcon(), func() {
-		go testKubeConnection(logFn)
+		go kube.TestKubeConnection(logFn)
 	})
 
 	kubeRefreshBtn := widget.NewButtonWithIcon("Neu laden", theme.ViewRefreshIcon(), func() {
 		logFn("🔄 Kubernetes Contexts werden neu geladen...")
-		ctxs, path, err := parseKubeContexts()
+		ctxs, path, err := kube.ParseKubeContexts()
 		if err != nil {
 			logFn(fmt.Sprintf("❌ Fehler: %v", err))
 			return
@@ -250,7 +300,6 @@ func runGUI() {
 		}()
 	})
 
-	var kubeCtxList *widget.List
 	kubeCtxList = widget.NewList(
 		func() int { return len(kubeContexts) },
 		func() fyne.CanvasObject {
@@ -351,7 +400,7 @@ func runGUI() {
 			if v := os.Getenv("AZURE_TENANT_ID"); v != "" {
 				envLines = append(envLines, fmt.Sprintf("export AZURE_TENANT_ID=%s", v))
 			}
-			openShellWithEnv(envLines, logFn)
+			shell.OpenShellWithEnv(envLines, logFn)
 		})
 
 	exportAWSEnv := widget.NewButtonWithIcon(
@@ -362,7 +411,7 @@ func runGUI() {
 			}
 			cmd := exec.Command("aws", "configure", "export-credentials",
 				"--format", "env")
-			cmd.Env = awsEnv(*selectedAWSProfile)
+			cmd.Env = cloudaws.AWSEnv(*selectedAWSProfile)
 			out, err := cmd.Output()
 			if err != nil {
 				logFn(fmt.Sprintf("❌ Fehler: %v", err))
@@ -422,4 +471,44 @@ func runGUI() {
 	}
 
 	w.ShowAndRun()
+}
+
+// showSyncDialog shows a detailed dialog with sync information and options
+func showSyncDialog(w fyne.Window, message string, missingKube, missingAWS []string, logFn func(string), kubeList *widget.List) {
+	content := widget.NewLabel(message)
+	content.Wrapping = fyne.TextWrapWord
+
+	syncBtn := widget.NewButton("Jetzt synchronisieren", func() {
+		go func() {
+			result := cloudaws.SyncAWSKube(logFn)
+			fyne.Do(func() {
+				if kubeList != nil {
+					kubeList.Refresh()
+				}
+				if result.Success {
+					dialog.ShowInformation("Synchronisierung", result.Message, w)
+				} else {
+					dialog.ShowError(fmt.Errorf("Synchronisierung fehlgeschlagen: %s", result.Message), w)
+				}
+			})
+		}()
+	})
+	syncBtn.Importance = widget.HighImportance
+	
+	details := widget.NewLabel("")
+	if len(missingKube) > 0 {
+		details.SetText(fmt.Sprintf("Fehlende Kube Contexts:\n• %s\n\nKube Contexts ohne AWS Profile:\n• %s",
+			strings.Join(missingKube, "\n• "),
+			strings.Join(missingAWS, "\n• ")))
+	}
+	details.Wrapping = fyne.TextWrapWord
+	
+	dialog.ShowCustom("Sync Status - Nicht synchronisiert", "Schließen",
+		container.NewVBox(
+			content,
+			widget.NewSeparator(),
+			details,
+			widget.NewSeparator(),
+			syncBtn,
+		), w)
 }
