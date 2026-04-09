@@ -29,6 +29,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
   release-linux:
     name: Release Linux
@@ -64,3 +65,42 @@ jobs:
           args: release --clean --config .goreleaser-linux.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-fish-food:
+    name: Update fish-food
+    needs: [release-macos, release-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install gotofish
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/afeldman/scripts/master/gotofish \
+            -o "$HOME/.local/bin/gotofish"
+          chmod +x "$HOME/.local/bin/gotofish"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download release checksums
+        run: |
+          mkdir -p dist
+          gh release download "${{ github.ref_name }}" \
+            --pattern "*checksums.txt" \
+            --dir dist/
+          cat dist/*checksums.txt > dist/checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate and push food file
+        run: |
+          gotofish gen --release cloudlogin \
+            --desc "AWS + Kubernetes SSO Connection Manager"
+        env:
+          GITHUB_ACTIONS: "true"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          FISH_FOOD_TOKEN: ${{ secrets.FISH_FOOD_TOKEN }}
