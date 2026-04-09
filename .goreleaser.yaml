@@ -50,3 +50,19 @@ changelog:
       - "^test:"
       - "^chore"
       - "merge conflict"
+
+brews:
+  - name: cloudlogin
+    repository:
+      owner: afeldman
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/afeldman/cloudlogin"
+    description: "AWS + Kubernetes SSO Connection Manager"
+    license: "Apache-2.0"
+    install: |
+      bin.install "cloudlogin"
+    test: |
+      system "#{bin}/cloudlogin", "--version"
+    skip_upload: auto
